@@ -3,11 +3,11 @@
 
 
 ## 1. enviroment:
-pytorch 0.4.0
-torchvision 0.2.0
-pretrainedmodels 0.7
-pandas 1.0.1
-python 3.6
+pytorch 0.4.0  
+torchvision 0.2.0  
+pretrainedmodels 0.7  
+pandas 1.0.1  
+python 3.6  
 
 	
 
