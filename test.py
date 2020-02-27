@@ -1,151 +1,122 @@
-#coding=utf-8
-import os
-import json
-import csv
+#test.py
+#!/usr/bin/env python3
+
+""" test neuron network performace
+print top1 and top5 err on test dataset
+of a model
+
+author baiyu
+"""
+
 import argparse
-import pandas as pd
-import numpy as np
-from math import ceil
-from tqdm import tqdm
-import pickle
-import shutil
+#from dataset import *
+
+#from skimage import io
+from matplotlib import pyplot as plt
 
 import torch
-import torch.nn as nn
+import torchvision.transforms as transforms
+from torch.utils.data import DataLoader
 from torch.autograd import Variable
-from torch.nn import CrossEntropyLoss
-from torchvision import datasets, models
-import torch.backends.cudnn as cudnn
-import torch.nn.functional as F
+from dataset.ImgLoader import ImgLoader
+import os
+import roc
 
-from transforms import transforms
-from models.LoadModel import MainModel
-from utils.dataset_DCL import collate_fn4train, collate_fn4test, collate_fn4val, dataset
-from config import LoadConfig, load_data_transformers
-from utils.test_tool import set_text, save_multi_img, cls_base_acc
-
-import pdb
-
-os.environ['CUDA_DEVICE_ORDRE'] = 'PCI_BUS_ID'
-os.environ['CUDA_VISIBLE_DEVICES'] = '0,1,2,3'
-
-def parse_args():
-    parser = argparse.ArgumentParser(description='dcl parameters')
-    parser.add_argument('--data', dest='dataset',
-                        default='CUB', type=str)
-    parser.add_argument('--backbone', dest='backbone',
-                        default='resnet50', type=str)
-    parser.add_argument('--b', dest='batch_size',
-                        default=16, type=int)
-    parser.add_argument('--nw', dest='num_workers',
-                        default=16, type=int)
-    parser.add_argument('--ver', dest='version',
-                        default='val', type=str)
-    parser.add_argument('--save', dest='resume',
-                        default=None, type=str)
-    parser.add_argument('--size', dest='resize_resolution',
-                        default=512, type=int)
-    parser.add_argument('--crop', dest='crop_resolution',
-                        default=448, type=int)
-    parser.add_argument('--ss', dest='save_suffix',
-                        default=None, type=str)
-    parser.add_argument('--acc_report', dest='acc_report',
-                        action='store_true')
-    parser.add_argument('--swap_num', default=[7, 7],
-                    nargs=2, metavar=('swap1', 'swap2'),
-                    type=int, help='specify a range')
-    args = parser.parse_args()
-    return args
+from conf import settings
+from utils import get_network, get_test_dataloader
 
 if __name__ == '__main__':
-    args = parse_args()
-    print(args)
-    # if args.submit:
-    #     args.version = 'test'
-    #     if args.save_suffix == '':
-    #         raise Exception('**** miss --ss save suffix is needed. ')
 
-    Config = LoadConfig(args, args.version)
-    transformers = load_data_transformers(args.resize_resolution, args.crop_resolution, args.swap_num)
-    data_set = dataset(Config,\
-                       anno=Config.val_anno if args.version == 'val' else Config.test_anno ,\
-                       unswap=transformers["None"],\
-                       swap=transformers["None"],\
-                       totensor=transformers['test_totensor'],\
-                       test=True)
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-net', type=str, default='resnet18', help='net type')
+    parser.add_argument('-weights', type=str, default='./checkpoint/resnet18/2019-12-30T20:04:53.202543/resnet18-20-regular.pth', help='the weights file you want to test')
+    parser.add_argument('-gpu', type=bool, default=True, help='use gpu or not')
+    parser.add_argument('-w', type=int, default=2, help='number of workers for dataloader')
+    parser.add_argument('-b', type=int, default=16, help='batch size for dataloader')
+    parser.add_argument('-s', type=bool, default=True, help='whether shuffle the dataset')
+    parser.add_argument('-test_list', type=str, default='4test_list.txt', help='initial learning rate')
+    parser.add_argument('-root_folder', type=str, default='/home/gqwang/Spoof_Croped', help='initial learning rate')
+    args = parser.parse_args()
 
-    dataloader = torch.utils.data.DataLoader(data_set,\
-                                             batch_size=args.batch_size,\
-                                             shuffle=False,\
-                                             num_workers=args.num_workers,\
-                                             collate_fn=collate_fn4test)
+    net = get_network(args)
 
-    setattr(dataloader, 'total_item_len', len(data_set))
+    test_dataset = ImgLoader(args.root_folder, os.path.join(args.root_folder, args.test_list),
+                             transforms.Compose([
+                                 transforms.Resize(248),
+                                 # transforms.RandomAffine(10),
+                                 transforms.CenterCrop(248),
+                                 transforms.RandomRotation(15),
+                                 transforms.ToTensor()
+                                 # transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
 
-    cudnn.benchmark = True
+                             ]))
+    test_loader = torch.utils.data.DataLoader(test_dataset,
+                                              batch_size=args.b,
+                                              num_workers=2,
+                                              pin_memory=True)
 
-    model = MainModel(Config)
-    model_dict=model.state_dict()
-    pretrained_dict=torch.load(resume)
-    pretrained_dict = {k[7:]: v for k, v in pretrained_dict.items() if k[7:] in model_dict}
-    model_dict.update(pretrained_dict)
-    model.load_state_dict(model_dict)
-    model.cuda()
-    model = nn.DataParallel(model)
+    net.load_state_dict(torch.load(args.weights), args.gpu)
+    print(net)
+    net.eval()
 
-    model.train(False)
-    with torch.no_grad():
-        val_corrects1 = 0
-        val_corrects2 = 0
-        val_corrects3 = 0
-        val_size = ceil(len(data_set) / dataloader.batch_size)
-        result_gather = {}
-        count_bar = tqdm(total=dataloader.__len__())
-        for batch_cnt_val, data_val in enumerate(dataloader):
-            count_bar.update(1)
-            inputs, labels, img_name = data_val
-            inputs = Variable(inputs.cuda())
-            labels = Variable(torch.from_numpy(np.array(labels)).long().cuda())
+    correct = 0.0
+    total = 0
 
-            outputs = model(inputs)
-            outputs_pred = outputs[0] + outputs[1][:,0:Config.numcls] + outputs[1][:,Config.numcls:2*Config.numcls]
+    result_list = []
+    label_list = []
+    TP = 0.
+    TN = 0.
+    FP = 0.
+    FN = 0.
 
-            top3_val, top3_pos = torch.topk(outputs_pred, 3)
+    for n_iter, (image, label) in enumerate(test_loader):
+        print("iteration: {}\ttotal {} iterations".format(n_iter + 1, len(test_loader)))
+        image = Variable(image).cuda()
+        labels = Variable(label).cuda()
+        outputs = net(image)
+        _, preds = outputs.max(1)
+        correct += preds.eq(labels).sum()
 
-            if args.version == 'val':
-                batch_corrects1 = torch.sum((top3_pos[:, 0] == labels)).data.item()
-                val_corrects1 += batch_corrects1
-                batch_corrects2 = torch.sum((top3_pos[:, 1] == labels)).data.item()
-                val_corrects2 += (batch_corrects2 + batch_corrects1)
-                batch_corrects3 = torch.sum((top3_pos[:, 2] == labels)).data.item()
-                val_corrects3 += (batch_corrects3 + batch_corrects2 + batch_corrects1)
+        for i in range(len(preds)):
+            if labels[i] == 1 and preds[i] == 1:
+                TP += 1
+            elif labels[i] == 0 and preds[i] == 0:
+                TN += 1
+            elif labels[i] == 1 and preds[i] == 0:
+                FN += 1
+            elif labels[i] == 0 and preds[i] == 1:
+                FP += 1
 
-            if args.acc_report:
-                for sub_name, sub_cat, sub_val, sub_label in zip(img_name, top3_pos.tolist(), top3_val.tolist(), labels.tolist()):
-                    result_gather[sub_name] = {'top1_cat': sub_cat[0], 'top2_cat': sub_cat[1], 'top3_cat': sub_cat[2],
-                                               'top1_val': sub_val[0], 'top2_val': sub_val[1], 'top3_val': sub_val[2],
-                                               'label': sub_label}
-    if args.acc_report:
-        torch.save(result_gather, 'result_gather_%s'%resume.split('/')[-1][:-4]+ '.pt')
+        outputs = torch.softmax(outputs, dim=-1)
+        preds_prob = outputs.to('cpu').detach().numpy()
+        labels = labels.to('cpu').detach().numpy()
+        for i_batch in range(preds.shape[0]):
+            result_list.append(preds_prob[i_batch, 1])
+            label_list.append(labels[i_batch])
 
-    count_bar.close()
+    TP_rate = float(TP / (TP + FN))
+    TN_rate = float(TN / (TN + FP))
 
-    if args.acc_report:
+    HTER = 1 - (TP_rate + TN_rate) / 2
+    metric = roc.cal_metric(label_list, result_list, True)
 
-        val_acc1 = val_corrects1 / len(data_set)
-        val_acc2 = val_corrects2 / len(data_set)
-        val_acc3 = val_corrects3 / len(data_set)
-        print('%sacc1 %f%s\n%sacc2 %f%s\n%sacc3 %f%s\n'%(8*'-', val_acc1, 8*'-', 8*'-', val_acc2, 8*'-', 8*'-',  val_acc3, 8*'-'))
+    print('Test set: Accuracy: {:.4f}, Auc: {:.4f}, HTER: {:.4f}'.format(
+        correct.float() / len(test_loader.dataset), metric[0], HTER
+    ))
+    print()
+        # _, pred = output.topk(1, 1, largest=True, sorted=True)
 
-        cls_top1, cls_top3, cls_count = cls_base_acc(result_gather)
-
-        acc_report_io = open('acc_report_%s_%s.json'%(args.save_suffix, resume.split('/')[-1]), 'w')
-        json.dump({'val_acc1':val_acc1,
-                   'val_acc2':val_acc2,
-                   'val_acc3':val_acc3,
-                   'cls_top1':cls_top1,
-                   'cls_top3':cls_top3,
-                   'cls_count':cls_count}, acc_report_io)
-        acc_report_io.close()
+        # label = label.view(label.size(0), -1).expand_as(pred)
+        # correct = pred.eq(label).float()
+        #
+        # # #compute top 5
+        # # correct_5 += correct[:, :5].sum()
+        #
+        # #compute top1
+        # correct_1 += correct[:, :1].sum()
 
 
+    # print()
+    # print("Top 1 err: ", 1 - correct_1 / len(test_loader.dataset))
+    # # print("Top 5 err: ", 1 - correct_5 / len(test_loader.dataset))
+    # print("Parameter numbers: {}".format(sum(p.numel() for p in net.parameters())))
